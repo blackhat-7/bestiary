@@ -9,29 +9,23 @@ a single file dropped into a config directory.
 Pairs with [vivarium](https://github.com/blackhat-7/vivarium) (the place where
 the agents live).
 
-## Install
-
-No PyPI release — install directly from git:
-
-```bash
-# floating (always latest main)
-uv tool install git+https://github.com/blackhat-7/bestiary.git
-
-# pinned (recommended for stable setups)
-uv tool install git+https://github.com/blackhat-7/bestiary.git@v0.1.0
-```
-
-This puts a `bestiary` binary on your `PATH`.
-
 ## Use as an MCP server
 
-Most MCP clients accept a `command` + `args`. Point them at `bestiary serve`.
+The simplest path is `uvx` — it installs and runs from git on first use,
+caches between runs, and updates when you change the ref. No manual
+install step.
 
 **Claude Code** (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "bestiary": { "command": "bestiary", "args": ["serve"] }
+    "bestiary": {
+      "command": "uvx",
+      "args": [
+        "--from", "git+https://github.com/blackhat-7/bestiary.git@main",
+        "bestiary", "serve"
+      ]
+    }
   }
 }
 ```
@@ -40,21 +34,39 @@ Most MCP clients accept a `command` + `args`. Point them at `bestiary serve`.
 ```json
 {
   "mcp": {
-    "bestiary": { "type": "local", "command": ["bestiary", "serve"], "enabled": true }
+    "bestiary": {
+      "type": "local",
+      "command": [
+        "uvx", "--from",
+        "git+https://github.com/blackhat-7/bestiary.git@main",
+        "bestiary", "serve"
+      ],
+      "enabled": true
+    }
   }
 }
 ```
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "bestiary": { "command": "bestiary", "args": ["serve"] }
-  }
-}
+**Claude Desktop** uses the same shape as Claude Code in
+`~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+Pin to a tag (`@v0.1.0`) for stability; `@main` floats with upstream but
+still uses the local cache between invocations. To force a refresh after a
+push: add `--refresh-package bestiary` to the args, or run
+`uv cache clean bestiary` once.
+
+### Alternative: pre-installed binary
+
+If you'd rather have `bestiary` on your `PATH` directly:
+
+```bash
+uv tool install git+https://github.com/blackhat-7/bestiary.git@main
+# then in your MCP client config:
+#   command = "bestiary", args = ["serve"]
 ```
 
-Verify with `bestiary list` — prints names of all tools that would be registered.
+Verify either approach with `bestiary list` (or
+`uvx --from ... bestiary list`) — prints the names of all registered tools.
 
 ## Built-in tools
 
