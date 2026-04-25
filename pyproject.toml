@@ -1,0 +1,46 @@
+[project]
+name = "bestiary"
+version = "0.1.0"
+description = "An extensible MCP server — a catalog of tools for AI agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Shaunak Pal" }]
+keywords = ["mcp", "model-context-protocol", "ai-tools", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = ["mcp>=1.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+bestiary = "bestiary.cli:main"
+
+[project.entry-points."bestiary.tools"]
+reddit = "bestiary.tools.reddit:register"
+
+[project.urls]
+Homepage = "https://github.com/blackhat-7/bestiary"
+Repository = "https://github.com/blackhat-7/bestiary"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
