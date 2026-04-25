@@ -25,6 +25,7 @@ bestiary = "bestiary.cli:main"
 
 [project.entry-points."bestiary.tools"]
 reddit = "bestiary.tools.reddit:register"
+arxiv = "bestiary.tools.arxiv:register"
 
 [project.urls]
 Homepage = "https://github.com/blackhat-7/bestiary"

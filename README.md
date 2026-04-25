@@ -73,6 +73,7 @@ Verify either approach with `bestiary list` (or
 | Tool | What it does | Auth |
 |---|---|---|
 | `reddit` | read posts/comments/subreddits/users via Reddit's public JSON API | none |
+| `arxiv`  | search arXiv, fetch paper metadata, and read paper text via the HTML rendering | none |
 
 ## Picking which tools register (context cost control)
 
