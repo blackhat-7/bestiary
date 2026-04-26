@@ -111,3 +111,29 @@ def test_format_timestamp_under_hour():
 
 def test_format_timestamp_with_hours():
     assert youtube._format_timestamp(3725.0) == "01:02:05"
+
+
+def test_default_cookies_is_chrome(monkeypatch):
+    monkeypatch.delenv("BESTIARY_YT_COOKIES_FROM_BROWSER", raising=False)
+    assert youtube._parse_cookies_env() == ("chrome", None)
+
+
+def test_cookies_env_override_browser(monkeypatch):
+    monkeypatch.setenv("BESTIARY_YT_COOKIES_FROM_BROWSER", "firefox")
+    assert youtube._parse_cookies_env() == ("firefox", None)
+
+
+def test_cookies_env_with_profile(monkeypatch):
+    monkeypatch.setenv("BESTIARY_YT_COOKIES_FROM_BROWSER", "firefox:/tmp/p")
+    assert youtube._parse_cookies_env() == ("firefox", "/tmp/p")
+
+
+def test_cookies_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("BESTIARY_YT_COOKIES_FROM_BROWSER", "none")
+    assert youtube._parse_cookies_env() is None
+
+
+def test_ydl_opts_defaults_to_chrome(monkeypatch):
+    monkeypatch.delenv("BESTIARY_YT_COOKIES_FROM_BROWSER", raising=False)
+    opts = youtube._ydl_opts()
+    assert opts.get("cookiesfrombrowser") == ("chrome",)

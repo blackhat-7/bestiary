@@ -7,12 +7,18 @@ cookies, which is what makes it survive YouTube's bot challenges.
 Optional dependency: install bestiary with the `[youtube]` extra, e.g.
     uvx --from "git+https://github.com/blackhat-7/bestiary.git@main" --with yt-dlp bestiary serve
 
-YouTube increasingly bot-challenges unauthenticated requests (`Sign in to
-confirm you're not a bot`). When that happens, point the tool at a logged-in
-browser profile via the env var:
+YouTube bot-challenges unauthenticated requests (`Sign in to confirm you're
+not a bot`). To survive that, this tool defaults to reading Chrome's local
+cookie jar — no Google login required, just Chrome installed on the machine.
+The anonymous visitor/consent cookies Chrome accumulates after a single visit
+to youtube.com are enough to look like a real browser session.
+
+To use a different browser (or a specific profile for region-locked content),
+set:
 
     BESTIARY_YT_COOKIES_FROM_BROWSER=firefox
     BESTIARY_YT_COOKIES_FROM_BROWSER=firefox:/path/to/profile
+    BESTIARY_YT_COOKIES_FROM_BROWSER=none   # disable cookies entirely
 
 Format mirrors yt-dlp's `--cookies-from-browser` flag. Supported browsers:
 brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale.
@@ -94,14 +100,28 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+_DEFAULT_BROWSER = "chrome"
+
+
 def _parse_cookies_env() -> tuple[str, str | None] | None:
+    """Resolve which browser cookie jar to use.
+
+    Default: chrome (no login required — yt-dlp reads anonymous session
+    cookies). Override or disable via BESTIARY_YT_COOKIES_FROM_BROWSER:
+      - unset / empty   → chrome
+      - "none" / "off"  → no cookies (raw unauthenticated request)
+      - "<browser>"     → that browser's default profile
+      - "<browser>:<profile-or-path>" → specific profile
+    """
     raw = os.environ.get("BESTIARY_YT_COOKIES_FROM_BROWSER", "").strip()
     if not raw:
+        return (_DEFAULT_BROWSER, None)
+    if raw.lower() in {"none", "off", "false", "0"}:
         return None
     browser, _, profile = raw.partition(":")
     browser = browser.strip().lower()
     if not browser:
-        return None
+        return (_DEFAULT_BROWSER, None)
     return (browser, profile.strip() or None)
 
 
@@ -125,6 +145,14 @@ def _ydl_opts() -> dict[str, Any]:
     return opts
 
 
+def _looks_like_cookie_jar_error(msg: str) -> bool:
+    """yt-dlp raises this when the chosen browser isn't installed / readable."""
+    lowered = msg.lower()
+    return (
+        "could not find" in lowered and "cookies database" in lowered
+    ) or "could not access cookies" in lowered or "unsupported browser" in lowered
+
+
 def _extract_info(video_id: str) -> dict[str, Any]:
     try:
         from yt_dlp import YoutubeDL  # type: ignore[import-not-found]
@@ -133,22 +161,56 @@ def _extract_info(video_id: str) -> dict[str, Any]:
         raise ApiError(_INSTALL_HINT) from exc
 
     url = f"https://www.youtube.com/watch?v={video_id}"
+
+    def _run(opts: dict[str, Any]) -> dict[str, Any] | None:
+        with YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+            return ydl.extract_info(url, download=False)
+
+    opts = _ydl_opts()
     try:
-        with YoutubeDL(_ydl_opts()) as ydl:  # type: ignore[arg-type]
-            info = ydl.extract_info(url, download=False)
+        info = _run(opts)
     except DownloadError as exc:
         msg = str(exc)
-        if "Sign in to confirm" in msg or "not a bot" in msg:
-            raise ApiError(
-                f"YouTube is bot-challenging this network. Set "
-                f"BESTIARY_YT_COOKIES_FROM_BROWSER to a logged-in browser "
-                f"profile (e.g. 'firefox:/path/to/profile'). underlying: {msg[:200]}"
-            ) from exc
-        raise ApiError(f"yt-dlp failed for {video_id}: {msg[:300]}") from exc
+        # Chosen browser cookie jar isn't readable (e.g. Chrome not installed)
+        # — retry without cookies. Bot detection might still bite, but that's
+        # a clearer signal than a confusing ImportError-shaped failure.
+        if "cookiesfrombrowser" in opts and _looks_like_cookie_jar_error(msg):
+            opts.pop("cookiesfrombrowser", None)
+            try:
+                info = _run(opts)
+            except DownloadError as exc2:
+                raise _wrap_download_error(video_id, str(exc2)) from exc2
+        else:
+            raise _wrap_download_error(video_id, msg) from exc
+    except Exception as exc:
+        # Cookie jar read failures sometimes surface as plain Exception
+        # (PermissionError on locked Chrome DB, ValueError on unknown browser).
+        msg = str(exc)
+        if "cookiesfrombrowser" in opts and _looks_like_cookie_jar_error(msg):
+            opts.pop("cookiesfrombrowser", None)
+            try:
+                info = _run(opts)
+            except DownloadError as exc2:
+                raise _wrap_download_error(video_id, str(exc2)) from exc2
+        else:
+            raise
 
     if not isinstance(info, dict):
         raise ApiError(f"yt-dlp returned no info for {video_id}")
     return dict(info)
+
+
+def _wrap_download_error(video_id: str, msg: str) -> ApiError:
+    if "Sign in to confirm" in msg or "not a bot" in msg:
+        return ApiError(
+            "YouTube is bot-challenging this request. The default cookie "
+            "source is Chrome — make sure Chrome is installed and has "
+            "visited youtube.com at least once (no login needed). To use a "
+            "different browser, set BESTIARY_YT_COOKIES_FROM_BROWSER "
+            "(e.g. 'firefox' or 'firefox:/path/to/profile'). "
+            f"underlying: {msg[:200]}"
+        )
+    return ApiError(f"yt-dlp failed for {video_id}: {msg[:300]}")
 
 
 def _pick_subtitle(
