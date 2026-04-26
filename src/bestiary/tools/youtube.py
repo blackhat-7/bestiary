@@ -1,23 +1,27 @@
-"""YouTube transcript tool — fetch caption/subtitle text without auth.
+"""YouTube transcript tool — fetch caption/subtitle text via yt-dlp.
 
-Wraps `youtube-transcript-api`. The maintenance pain of YouTube's churn-prone
-internal endpoints sits with that upstream — pinning a known-working version
-isolates this tool from the periodic breakage you'd get rolling your own.
+Wraps `yt-dlp`. Compared to scraping the transcript JSON3 endpoint directly
+(`youtube-transcript-api`), yt-dlp uses the InnerTube API and supports browser
+cookies, which is what makes it survive YouTube's bot challenges.
 
 Optional dependency: install bestiary with the `[youtube]` extra, e.g.
-    uvx --from "git+https://github.com/blackhat-7/bestiary.git@main[youtube]" bestiary serve
-or
-    uv tool install --with youtube-transcript-api git+https://...
+    uvx --from "git+https://github.com/blackhat-7/bestiary.git@main" --with yt-dlp bestiary serve
 
-If the library isn't installed, the tool still registers but each call returns
-an ApiError with install instructions.
+YouTube increasingly bot-challenges unauthenticated requests (`Sign in to
+confirm you're not a bot`). When that happens, point the tool at a logged-in
+browser profile via the env var:
 
-YouTube IP-blocks aggressively from cloud/datacenter ranges; expect this to
-work from residential IPs and fail (RequestBlocked / IpBlocked) from VPS.
+    BESTIARY_YT_COOKIES_FROM_BROWSER=firefox
+    BESTIARY_YT_COOKIES_FROM_BROWSER=firefox:/path/to/profile
+
+Format mirrors yt-dlp's `--cookies-from-browser` flag. Supported browsers:
+brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale.
+Firefox forks (Zen, LibreWolf, etc.) work as `firefox:/path/to/profile`.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -41,8 +45,8 @@ _URL_PATTERN = re.compile(
 )
 _LANG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$")
 _INSTALL_HINT = (
-    "youtube-transcript-api not installed — install bestiary with the "
-    "[youtube] extra (e.g. `uv tool install --with youtube-transcript-api ...`)"
+    "yt-dlp not installed — install bestiary with the [youtube] extra "
+    "(e.g. `uvx --with yt-dlp ...`)"
 )
 
 
@@ -90,6 +94,110 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+def _parse_cookies_env() -> tuple[str, str | None] | None:
+    raw = os.environ.get("BESTIARY_YT_COOKIES_FROM_BROWSER", "").strip()
+    if not raw:
+        return None
+    browser, _, profile = raw.partition(":")
+    browser = browser.strip().lower()
+    if not browser:
+        return None
+    return (browser, profile.strip() or None)
+
+
+def _ydl_opts() -> dict[str, Any]:
+    opts: dict[str, Any] = {
+        "simulate": True,
+        "skip_download": True,
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "ignore_no_formats_error": True,
+    }
+    cookies = _parse_cookies_env()
+    if cookies is not None:
+        browser, profile = cookies
+        # yt-dlp Python API: (browser, profile, keyring, container)
+        opts["cookiesfrombrowser"] = (browser, profile, None, None) if profile else (browser,)
+    return opts
+
+
+def _extract_info(video_id: str) -> dict[str, Any]:
+    try:
+        from yt_dlp import YoutubeDL  # type: ignore[import-not-found]
+        from yt_dlp.utils import DownloadError  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ApiError(_INSTALL_HINT) from exc
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        with YoutubeDL(_ydl_opts()) as ydl:  # type: ignore[arg-type]
+            info = ydl.extract_info(url, download=False)
+    except DownloadError as exc:
+        msg = str(exc)
+        if "Sign in to confirm" in msg or "not a bot" in msg:
+            raise ApiError(
+                f"YouTube is bot-challenging this network. Set "
+                f"BESTIARY_YT_COOKIES_FROM_BROWSER to a logged-in browser "
+                f"profile (e.g. 'firefox:/path/to/profile'). underlying: {msg[:200]}"
+            ) from exc
+        raise ApiError(f"yt-dlp failed for {video_id}: {msg[:300]}") from exc
+
+    if not isinstance(info, dict):
+        raise ApiError(f"yt-dlp returned no info for {video_id}")
+    return dict(info)
+
+
+def _pick_subtitle(
+    info: dict[str, Any], langs: list[str]
+) -> tuple[list[dict[str, Any]], str, bool]:
+    subs = info.get("subtitles") or {}
+    auto = info.get("automatic_captions") or {}
+    for lang in langs:
+        if subs.get(lang):
+            return subs[lang], lang, False
+        if auto.get(lang):
+            return auto[lang], lang, True
+    return [], "", False
+
+
+def _download_json3(formats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    import json
+    import urllib.error
+    import urllib.request
+
+    json3 = next((f for f in formats if f.get("ext") == "json3"), None)
+    if json3 is None:
+        raise ApiError("no json3 subtitle format available")
+    sub_url = json3.get("url")
+    if not sub_url:
+        raise ApiError("subtitle entry missing url")
+    try:
+        with urllib.request.urlopen(sub_url, timeout=30) as resp:
+            data = json.load(resp)
+    except urllib.error.URLError as exc:
+        raise ApiError(f"could not download subtitle: {exc}") from exc
+    return data.get("events") or []
+
+
+def _events_to_lines(events: list[dict[str, Any]], timestamps: bool) -> tuple[list[str], float]:
+    lines: list[str] = []
+    last_end = 0.0
+    for ev in events:
+        segs = ev.get("segs") or []
+        text = "".join(s.get("utf8", "") for s in segs).strip()
+        if not text:
+            continue
+        start = (ev.get("tStartMs") or 0) / 1000.0
+        duration = (ev.get("dDurationMs") or 0) / 1000.0
+        last_end = start + duration
+        lines.append(f"[{_format_timestamp(start)}] {text}" if timestamps else text)
+    return lines, last_end
+
+
 def _do_transcript(
     video: str | None,
     languages: Any,
@@ -104,41 +212,26 @@ def _do_transcript(
     if cap is None:
         cap = 200_000
 
-    try:
-        from youtube_transcript_api import (  # type: ignore[import-not-found]
-            CouldNotRetrieveTranscript,
-            YouTubeTranscriptApi,
-        )
-    except ImportError as exc:
-        raise ApiError(_INSTALL_HINT) from exc
+    info = _extract_info(vid)
+    formats, lang_code, is_generated = _pick_subtitle(info, langs)
+    if not formats:
+        raise ApiError(f"no transcript available for {vid} in languages {langs}")
 
-    api = YouTubeTranscriptApi()
-    try:
-        fetched = api.fetch(vid, languages=langs)
-    except CouldNotRetrieveTranscript as exc:
-        raise ApiError(
-            f"could not retrieve transcript for {vid}: {exc.__class__.__name__}"
-        ) from exc
-
-    snippets = list(fetched.snippets)
-    if timestamps:
-        lines = [f"[{_format_timestamp(s.start)}] {s.text}" for s in snippets]
-    else:
-        lines = [s.text for s in snippets]
+    events = _download_json3(formats)
+    lines, duration = _events_to_lines(events, bool(timestamps))
     text = "\n".join(lines)
     truncated = len(text) > cap
     if truncated:
         text = text[:cap]
-    duration = (snippets[-1].start + snippets[-1].duration) if snippets else 0.0
 
     return {
         "video_id": vid,
         "url": f"https://www.youtube.com/watch?v={vid}",
-        "language": getattr(fetched, "language", None),
-        "language_code": getattr(fetched, "language_code", None),
-        "is_generated": getattr(fetched, "is_generated", None),
+        "language": lang_code,
+        "language_code": lang_code,
+        "is_generated": is_generated,
         "duration_seconds": round(duration, 2),
-        "entry_count": len(snippets),
+        "entry_count": len(lines),
         "text": text,
         "char_count": len(text),
         "truncated": truncated,
@@ -147,33 +240,28 @@ def _do_transcript(
 
 def _do_list(video: str | None) -> dict[str, Any]:
     vid = _extract_video_id(video)
-
-    try:
-        from youtube_transcript_api import (  # type: ignore[import-not-found]
-            CouldNotRetrieveTranscript,
-            YouTubeTranscriptApi,
-        )
-    except ImportError as exc:
-        raise ApiError(_INSTALL_HINT) from exc
-
-    api = YouTubeTranscriptApi()
-    try:
-        listing = api.list(vid)
-    except CouldNotRetrieveTranscript as exc:
-        raise ApiError(
-            f"could not list transcripts for {vid}: {exc.__class__.__name__}"
-        ) from exc
-
-    transcripts = []
-    for t in listing:
-        transcripts.append(
-            {
-                "language": getattr(t, "language", None),
-                "language_code": getattr(t, "language_code", None),
-                "is_generated": getattr(t, "is_generated", None),
-                "is_translatable": getattr(t, "is_translatable", None),
-            }
-        )
+    info = _extract_info(vid)
+    transcripts: list[dict[str, Any]] = []
+    for lang_code, formats in (info.get("subtitles") or {}).items():
+        if formats:
+            transcripts.append(
+                {
+                    "language": lang_code,
+                    "language_code": lang_code,
+                    "is_generated": False,
+                    "is_translatable": False,
+                }
+            )
+    for lang_code, formats in (info.get("automatic_captions") or {}).items():
+        if formats:
+            transcripts.append(
+                {
+                    "language": lang_code,
+                    "language_code": lang_code,
+                    "is_generated": True,
+                    "is_translatable": False,
+                }
+            )
     return {"video_id": vid, "transcripts": transcripts}
 
 
@@ -184,7 +272,7 @@ def youtube(
     timestamps: bool | None = None,
     max_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Fetch YouTube video transcripts (no auth).
+    """Fetch YouTube video transcripts (no auth, optional browser cookies).
 
     `video` accepts either a YouTube URL (watch / youtu.be / embed / shorts /
     live / v) or a raw 11-char video ID.
