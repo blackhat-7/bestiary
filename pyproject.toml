@@ -19,6 +19,7 @@ dependencies = ["mcp>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
+youtube = ["youtube-transcript-api>=1.0"]
 
 [project.scripts]
 bestiary = "bestiary.cli:main"
@@ -28,6 +29,7 @@ reddit = "bestiary.tools.reddit:register"
 arxiv = "bestiary.tools.arxiv:register"
 hackernews = "bestiary.tools.hackernews:register"
 stackexchange = "bestiary.tools.stackexchange:register"
+youtube = "bestiary.tools.youtube:register"
 
 [project.urls]
 Homepage = "https://github.com/blackhat-7/bestiary"
