@@ -72,8 +72,10 @@ Verify either approach with `bestiary list` (or
 
 | Tool | What it does | Auth |
 |---|---|---|
-| `reddit` | read posts/comments/subreddits/users via Reddit's public JSON API | none |
-| `arxiv`  | search arXiv, fetch paper metadata, and read paper text via the HTML rendering | none |
+| `reddit`        | read posts/comments/subreddits/users via Reddit's public JSON API | none |
+| `arxiv`         | search arXiv, fetch paper metadata, and read paper text via the HTML rendering | none |
+| `hackernews`    | search HN, fetch a story with its comment tree, list front page, look up users (Algolia HN API) | none |
+| `stackexchange` | search Stack Overflow / Server Fault / Super User / etc., fetch a question with answers | none |
 
 ## Picking which tools register (context cost control)
 
