@@ -27,11 +27,19 @@ def _make_archive(path) -> None:
     channels = [("C1", "general"), ("C2", "random")]
     now = int(datetime.now(timezone.utc).timestamp())
     msgs = [
-        # (id, channel, ts, text, user) — ids/ts are unix seconds, near now
+        # (id, channel, ts, text, user) — ids/ts are unix seconds
         (now - 300, "C1", f"{now - 300}.000001", "hello world", "U1"),
         (now - 200, "C1", f"{now - 200}.000001", "deploy went fine", "U2"),
         (now - 100, "C1", f"{now - 100}.000001", "see https://x.dev", "U1"),
         (now - 50, "C2", f"{now - 50}.000001", "random chatter", "U2"),
+        # one message far in the past, for date-range tests
+        (
+            1642250000,
+            "C1",
+            "1642250000.000001",  # 2022-01-15
+            "ancient deploy postmortem",
+            "U2",
+        ),
     ]
     con.executemany("INSERT INTO CHANNEL VALUES (?, ?)", channels)
     con.executemany("INSERT INTO S_USER VALUES (?, ?)", users)
@@ -91,6 +99,41 @@ def test_search(archive):
 def test_search_requires_query(archive):
     with pytest.raises(ValidationError):
         slack.slack_stats(op="search")
+
+
+def test_absolute_date_range(archive):
+    result = slack.slack_stats(op="messages_per_day", start="2022-01-01", end="2022-01-31")
+    assert len(result) == 1
+    assert result[0]["day"] == "2022-01-15"
+    assert result[0]["messages"] == 1
+
+
+def test_date_range_windows_divide_history(archive):
+    # windowing like an LLM would: two adjacent windows split the messages
+    past = slack.slack_stats(op="channels", start="2022-01-01", end="2022-12-31")
+    present = slack.slack_stats(op="channels", start="2023-01-01")
+    assert {r["channel"]: r["messages"] for r in past} == {"general": 1}
+    assert {r["channel"]: r["messages"] for r in present} == {
+        "general": 3,
+        "random": 1,
+    }
+
+
+def test_date_range_filters_search(archive):
+    result = slack.slack_stats(
+        op="search", query="deploy", start="2022-01-01", end="2022-12-31"
+    )
+    assert [r["text"] for r in result] == ["ancient deploy postmortem"]
+
+
+def test_invalid_date(archive):
+    with pytest.raises(ValidationError):
+        slack.slack_stats(op="channels", start="2022/01/01")
+
+
+def test_start_after_end(archive):
+    with pytest.raises(ValidationError):
+        slack.slack_stats(op="channels", start="2023-01-01", end="2022-01-01")
 
 
 def test_invalid_op(archive):
