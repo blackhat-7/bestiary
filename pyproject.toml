@@ -15,7 +15,8 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
-dependencies = ["mcp>=1.0"]
+# Pinned <2: mcp 2.x renamed FastMCP to MCPServer and changed the API.
+dependencies = ["mcp>=1.0,<2"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
