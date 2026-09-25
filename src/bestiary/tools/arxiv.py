@@ -7,14 +7,11 @@ ar5iv.labs.arxiv.org/html/<id> for older papers without an official HTML render.
 from __future__ import annotations
 
 import re
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..core import http
 from ..core.errors import ApiError, ValidationError
 from ..core.validation import bounded_int, enum_value
 
@@ -24,13 +21,8 @@ if TYPE_CHECKING:
 API_URL = "https://export.arxiv.org/api/query"
 HTML_URL = "https://arxiv.org/html/{id}"
 AR5IV_URL = "https://ar5iv.labs.arxiv.org/html/{id}"
-USER_AGENT = "bestiary/0.1 (arxiv-client)"
-
-# arxiv rejects valid requests with these in bursts lasting ~10-20s; retry with
-# doubling delays starting at the 3s pause its API guidelines ask for.
-_RETRY_CODES = {406, 429, 500, 502, 503, 504}
-_MAX_ATTEMPTS = 4
-_RETRY_DELAY = 3.0
+# arxiv also rejects valid requests with 406 in bursts lasting ~10-20s.
+_RETRY_CODES = http.RETRY_CODES | {406}
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
@@ -81,32 +73,6 @@ def _validate_category(value: str | None) -> str | None:
     return value
 
 
-def _http_get(url: str, *, timeout: int = 30) -> bytes:
-    return _http_fetch(url, timeout=timeout)[1]
-
-
-def _http_fetch(url: str, *, timeout: int = 30) -> tuple[str, bytes]:
-    """GET url and return (final_url_after_redirects, body)."""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    attempt = 1
-    while True:
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.geturl(), response.read()
-        except urllib.error.HTTPError as exc:
-            if exc.code in _RETRY_CODES and attempt < _MAX_ATTEMPTS:
-                time.sleep(_RETRY_DELAY * 2 ** (attempt - 1))
-                attempt += 1
-                continue
-            if exc.code == 404:
-                raise ApiError(f"not found: {url}") from exc
-            if exc.code == 429:
-                raise ApiError("rate limited by arxiv") from exc
-            raise ApiError(f"arxiv http error: {exc.code}") from exc
-        except urllib.error.URLError as exc:
-            raise ApiError(f"arxiv request failed: {exc.reason}") from exc
-
-
 def _parse_entry(entry: ET.Element) -> dict[str, Any]:
     def text(tag: str) -> str:
         el = entry.find(f"{ATOM_NS}{tag}")
@@ -146,8 +112,7 @@ def _parse_entry(entry: ET.Element) -> dict[str, Any]:
 
 
 def _query_api(params: dict[str, Any]) -> list[dict[str, Any]]:
-    url = f"{API_URL}?{urllib.parse.urlencode(params)}"
-    body = _http_get(url)
+    _, body = http.fetch(API_URL, "arxiv", params=params, retry_codes=_RETRY_CODES)
     try:
         root = ET.fromstring(body)
     except ET.ParseError as exc:
@@ -201,7 +166,9 @@ def _fetch_html_text(paper_id: str) -> tuple[str, str]:
     for template in (HTML_URL, AR5IV_URL):
         url = template.format(id=paper_id)
         try:
-            final_url, body = _http_fetch(url, timeout=60)
+            final_url, body = http.fetch(
+                url, "arxiv", retry_codes=_RETRY_CODES, timeout=60
+            )
         except ApiError as exc:
             last_err = exc
             continue

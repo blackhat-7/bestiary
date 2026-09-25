@@ -3,8 +3,6 @@
 Anonymous use is rate-limited to ~300 req/day per IP — sufficient for read-mostly
 LLM workflows. Defaults to the stackoverflow.com site; pass `site` to query
 others (serverfault, superuser, askubuntu, unix, math, stats, security, etc.).
-
-Stack Exchange API responses are gzip-encoded; we decompress before parsing.
 """
 
 from __future__ import annotations
@@ -12,12 +10,10 @@ from __future__ import annotations
 import gzip
 import json
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..core import http
 from ..core.errors import ApiError, ValidationError
 from ..core.validation import bounded_int, enum_value
 
@@ -25,7 +21,6 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 BASE_URL = "https://api.stackexchange.com/2.3"
-USER_AGENT = "bestiary/0.1 (stackexchange-client)"
 
 SeOp = Literal["search", "question"]
 SortValue = Literal["relevance", "votes", "creation", "activity"]
@@ -35,38 +30,25 @@ _SITE_RE = re.compile(r"^[a-z][a-z0-9.-]{0,31}$")
 _TAG_RE = re.compile(r"^[a-z0-9.+#-]{1,40}$")
 
 
-def _decode(data: bytes, encoding: str | None) -> str:
-    if encoding and "gzip" in encoding.lower():
-        data = gzip.decompress(data)
-    return data.decode("utf-8")
+def _json(body: bytes) -> Any:
+    # The API gzips every response, including errors, regardless of Accept-Encoding.
+    if body[:2] == b"\x1f\x8b":
+        body = gzip.decompress(body)
+    return json.loads(body)
 
 
 def _api_get(path: str, params: dict[str, Any]) -> Any:
-    query = urllib.parse.urlencode(
-        {k: v for k, v in params.items() if v is not None}
-    )
-    url = f"{BASE_URL}/{path}?{query}"
-    request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"}
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            text = _decode(response.read(), response.headers.get("Content-Encoding"))
-        payload = json.loads(text)
-    except urllib.error.HTTPError as exc:
-        msg = str(exc.code)
+        _, body = http.fetch(f"{BASE_URL}/{path}", "stackexchange", params=params)
+    except http.HttpError as exc:
         try:
-            err = json.loads(_decode(exc.read(), exc.headers.get("Content-Encoding")))
-            msg = err.get("error_message") or err.get("error_name") or msg
-        except Exception:
-            pass
-        if exc.code == 400:
-            raise ApiError(f"stackexchange bad request: {msg}") from exc
-        if exc.code == 429:
-            raise ApiError(f"rate limited by stackexchange: {msg}") from exc
-        raise ApiError(f"stackexchange http error {exc.code}: {msg}") from exc
-    except urllib.error.URLError as exc:
-        raise ApiError(f"stackexchange request failed: {exc.reason}") from exc
+            detail = _json(exc.body).get("error_message")
+        except (ValueError, OSError, AttributeError):
+            detail = None
+        if not detail:
+            raise
+        raise ApiError(f"{exc}: {detail}") from exc
+    payload = _json(body)
     if isinstance(payload, dict) and payload.get("error_message"):
         raise ApiError(f"stackexchange error: {payload['error_message']}")
     return payload

@@ -31,6 +31,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..core import http
 from ..core.errors import ApiError, ValidationError
 from ..core.validation import bounded_int
 
@@ -227,22 +228,13 @@ def _pick_subtitle(
 
 
 def _download_json3(formats: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    import json
-    import urllib.error
-    import urllib.request
-
     json3 = next((f for f in formats if f.get("ext") == "json3"), None)
     if json3 is None:
         raise ApiError("no json3 subtitle format available")
     sub_url = json3.get("url")
     if not sub_url:
         raise ApiError("subtitle entry missing url")
-    try:
-        with urllib.request.urlopen(sub_url, timeout=30) as resp:
-            data = json.load(resp)
-    except urllib.error.URLError as exc:
-        raise ApiError(f"could not download subtitle: {exc}") from exc
-    return data.get("events") or []
+    return http.get_json(sub_url, "youtube subtitles").get("events") or []
 
 
 def _events_to_lines(events: list[dict[str, Any]], timestamps: bool) -> tuple[list[str], float]:

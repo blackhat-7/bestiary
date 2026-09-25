@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 from html.parser import HTMLParser
 from typing import TYPE_CHECKING, Any, Literal
 
+from ..core import http
 from ..core.errors import ApiError, ValidationError
 from ..core.validation import bounded_int, enum_value
 
@@ -17,7 +14,6 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 BASE_URL = "https://hn.algolia.com/api/v1"
-USER_AGENT = "bestiary/0.1 (hackernews-client)"
 
 HnOp = Literal["search", "item", "front", "user"]
 SortValue = Literal["relevance", "date"]
@@ -29,24 +25,7 @@ _USERNAME = re.compile(r"^[A-Za-z0-9_-]{2,32}$")
 
 
 def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    query = urllib.parse.urlencode(
-        {k: v for k, v in (params or {}).items() if v is not None}
-    )
-    url = f"{BASE_URL}/{path}"
-    if query:
-        url = f"{url}?{query}"
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise ApiError(f"not found: {path}") from exc
-        if exc.code == 429:
-            raise ApiError("rate limited by hackernews") from exc
-        raise ApiError(f"hackernews http error: {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise ApiError(f"hackernews request failed: {exc.reason}") from exc
+    return http.get_json(f"{BASE_URL}/{path}", "hackernews", params=params)
 
 
 class _TextStripper(HTMLParser):
