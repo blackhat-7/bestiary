@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import urllib.error
+
 import pytest
 
-from bestiary.core.errors import ValidationError
+from bestiary.core.errors import ApiError, ValidationError
 from bestiary.tools import arxiv
 
 
@@ -119,3 +121,62 @@ def test_text_extractor_decodes_entities():
     parser = arxiv._TextExtractor()
     parser.feed("<p>caf&eacute; &amp; tea</p>")
     assert "café & tea" in parser.text()
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://x", code, "err", {}, None)
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def geturl(self):
+        return "https://x"
+
+    def read(self):
+        return b"ok"
+
+
+def test_http_fetch_retries_transient_errors(monkeypatch):
+    outcomes = [_http_error(406), _http_error(503), _FakeResponse()]
+
+    def fake_urlopen(request, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(arxiv.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(arxiv.time, "sleep", lambda _: None)
+    assert arxiv._http_fetch("https://x") == ("https://x", b"ok")
+
+
+def test_http_fetch_gives_up_after_max_attempts(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(1)
+        raise _http_error(406)
+
+    monkeypatch.setattr(arxiv.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(arxiv.time, "sleep", lambda _: None)
+    with pytest.raises(ApiError, match="406"):
+        arxiv._http_fetch("https://x")
+    assert len(calls) == arxiv._MAX_ATTEMPTS
+
+
+def test_http_fetch_does_not_retry_404(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(1)
+        raise _http_error(404)
+
+    monkeypatch.setattr(arxiv.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(ApiError, match="not found"):
+        arxiv._http_fetch("https://x")
+    assert len(calls) == 1

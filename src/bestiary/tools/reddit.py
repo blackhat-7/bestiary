@@ -1,8 +1,13 @@
-"""Reddit tool — read-only access to Reddit's anonymous public JSON endpoints."""
+"""Reddit tool — read-only access to Reddit's public JSON endpoints.
+
+Reddit 403s logged-out JSON requests since May 2026, so requests carry the
+`reddit_session` cookie from a logged-in browser, read from $REDDIT_SESSION.
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +21,7 @@ if TYPE_CHECKING:
 
 BASE_URL = "https://www.reddit.com"
 USER_AGENT = "bestiary/0.1 (reddit-json-client)"
+SESSION_ENV = "REDDIT_SESSION"
 
 RedditOp = Literal["search", "posts", "subreddit", "post", "user"]
 TimeRange = Literal["hour", "day", "week", "month", "year", "all"]
@@ -32,8 +38,17 @@ def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
     query: dict[str, Any] = {"raw_json": "1"}
     if params:
         query.update({k: v for k, v in params.items() if v is not None})
+    session = os.environ.get(SESSION_ENV)
+    if not session:
+        raise ApiError(
+            f"{SESSION_ENV} is not set: copy the reddit_session cookie from a "
+            "browser logged into reddit.com"
+        )
     url = f"{BASE_URL}/{path}.json?{urllib.parse.urlencode(query)}"
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Cookie": f"reddit_session={session}"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -42,6 +57,10 @@ def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
             raise ApiError(f"not found: {path}") from exc
         if exc.code == 429:
             raise ApiError("rate limited by Reddit") from exc
+        if exc.code == 403:
+            raise ApiError(
+                f"reddit http error: 403 ({SESSION_ENV} may be expired or invalid)"
+            ) from exc
         raise ApiError(f"reddit http error: {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise ApiError(f"reddit request failed: {exc.reason}") from exc
@@ -196,7 +215,7 @@ def reddit(
     username: str | None = None,
     posts: int | None = None,
 ) -> dict[str, Any]:
-    """Read Reddit (anonymous public JSON endpoints).
+    """Read Reddit (public JSON endpoints, authenticated via $REDDIT_SESSION).
 
     Operations:
       - search:    full-text search posts. required: query. optional: subreddit, sort, time, limit.

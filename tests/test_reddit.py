@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bestiary.core.errors import ValidationError
+from bestiary.core.errors import ApiError, ValidationError
 from bestiary.tools import reddit
 
 
@@ -41,3 +41,9 @@ def test_invalid_op_rejected():
 def test_limit_out_of_range():
     with pytest.raises(ValidationError):
         reddit.reddit(op="posts", subreddit="python", limit=200)
+
+
+def test_requires_session_cookie(monkeypatch):
+    monkeypatch.delenv(reddit.SESSION_ENV, raising=False)
+    with pytest.raises(ApiError, match=reddit.SESSION_ENV):
+        reddit.reddit(op="subreddit", subreddit="python")
