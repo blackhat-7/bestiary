@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.error
+
 import pytest
 
 from bestiary.core.errors import ApiError, ValidationError
@@ -47,3 +49,53 @@ def test_requires_session_cookie(monkeypatch):
     monkeypatch.delenv(reddit.SESSION_ENV, raising=False)
     with pytest.raises(ApiError, match=reddit.SESSION_ENV):
         reddit.reddit(op="subreddit", subreddit="python")
+
+
+def _comment(id: str, replies: object = "") -> dict:
+    return {"kind": "t1", "data": {"id": id, "body": id, "replies": replies}}
+
+
+def _listing(*children: dict) -> dict:
+    return {"data": {"children": list(children)}}
+
+
+def test_flatten_comments_walks_reply_tree_depth_first():
+    tree = _listing(
+        _comment("a", _listing(_comment("a1", _listing(_comment("a1x"))))),
+        {"kind": "more", "data": {}},
+        _comment("b"),
+    )
+    flat = reddit._flatten_comments(tree)
+    assert [(c["id"], c["depth"]) for c in flat] == [
+        ("a", 0),
+        ("a1", 1),
+        ("a1x", 2),
+        ("b", 0),
+    ]
+
+
+class _FakeResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return b"{}"
+
+
+def test_api_get_retries_rate_limit(monkeypatch):
+    outcomes = [urllib.error.HTTPError("https://x", 429, "err", {}, None), _FakeResponse()]
+
+    def fake_urlopen(request, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setenv(reddit.SESSION_ENV, "cookie")
+    monkeypatch.setattr(reddit.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(reddit.time, "sleep", lambda _: None)
+    assert reddit._api_get("r/python/about") == {}
+    assert not outcomes

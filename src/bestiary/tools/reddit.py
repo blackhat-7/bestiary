@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +24,11 @@ BASE_URL = "https://www.reddit.com"
 USER_AGENT = "bestiary/0.1 (reddit-json-client)"
 SESSION_ENV = "REDDIT_SESSION"
 
+# Retry rate limits and transient server errors with doubling delays.
+_RETRY_CODES = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_RETRY_DELAY = 2.0
+
 RedditOp = Literal["search", "posts", "subreddit", "post", "user"]
 TimeRange = Literal["hour", "day", "week", "month", "year", "all"]
 SortValue = Literal[
@@ -35,35 +41,38 @@ _TIME_VALUES = {"hour", "day", "week", "month", "year", "all"}
 
 
 def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    query: dict[str, Any] = {"raw_json": "1"}
-    if params:
-        query.update({k: v for k, v in params.items() if v is not None})
     session = os.environ.get(SESSION_ENV)
     if not session:
         raise ApiError(
             f"{SESSION_ENV} is not set: copy the reddit_session cookie from a "
             "browser logged into reddit.com"
         )
-    url = f"{BASE_URL}/{path}.json?{urllib.parse.urlencode(query)}"
+    query = urllib.parse.urlencode({"raw_json": "1", **(params or {})})
     request = urllib.request.Request(
-        url,
+        f"{BASE_URL}/{path}.json?{query}",
         headers={"User-Agent": USER_AGENT, "Cookie": f"reddit_session={session}"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise ApiError(f"not found: {path}") from exc
-        if exc.code == 429:
-            raise ApiError("rate limited by Reddit") from exc
-        if exc.code == 403:
-            raise ApiError(
-                f"reddit http error: 403 ({SESSION_ENV} may be expired or invalid)"
-            ) from exc
-        raise ApiError(f"reddit http error: {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise ApiError(f"reddit request failed: {exc.reason}") from exc
+    attempt = 1
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in _RETRY_CODES and attempt < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_DELAY * 2 ** (attempt - 1))
+                attempt += 1
+                continue
+            if exc.code == 404:
+                raise ApiError(f"not found: {path}") from exc
+            if exc.code == 429:
+                raise ApiError("rate limited by Reddit") from exc
+            if exc.code == 403:
+                raise ApiError(
+                    f"reddit http error: 403 ({SESSION_ENV} may be expired or invalid)"
+                ) from exc
+            raise ApiError(f"reddit http error: {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise ApiError(f"reddit request failed: {exc.reason}") from exc
 
 
 def _clean_post(raw: dict[str, Any]) -> dict[str, Any]:
@@ -83,14 +92,33 @@ def _clean_post(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _clean_comment(raw: dict[str, Any]) -> dict[str, Any]:
-    data = raw.get("data", raw)
-    return {
-        "id": data.get("id"),
-        "author": data.get("author"),
-        "body": data.get("body") or "",
-        "score": data.get("score"),
-    }
+def _listing_posts(listing: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_clean_post(item) for item in listing.get("children", [])]
+
+
+def _flatten_comments(listing: dict[str, Any], depth: int = 0) -> list[dict[str, Any]]:
+    """Walk a comment listing depth-first into a depth-tagged flat list.
+
+    Skips "more" stubs (collapsed replies Reddit didn't send). A comment with
+    no replies has `replies == ""` rather than an empty listing.
+    """
+    out: list[dict[str, Any]] = []
+    for child in listing.get("data", {}).get("children", []):
+        if child.get("kind") != "t1":
+            continue
+        data = child["data"]
+        out.append(
+            {
+                "id": data.get("id"),
+                "author": data.get("author"),
+                "body": data.get("body") or "",
+                "score": data.get("score"),
+                "depth": depth,
+            }
+        )
+        if isinstance(data.get("replies"), dict):
+            out.extend(_flatten_comments(data["replies"], depth + 1))
+    return out
 
 
 def _clean_subreddit(raw: dict[str, Any]) -> dict[str, Any]:
@@ -131,18 +159,14 @@ def _do_search(
     time = enum_value(time, "time", _TIME_VALUES) or "all"
     limit = bounded_int(limit, "limit", minimum=1, maximum=100) or 10
 
+    params = {"q": query, "sort": sort, "t": time, "limit": limit}
+    path = "search"
     if sub is not None:
         path = f"r/{sub}/search"
-        params = {"q": query, "restrict_sr": "1", "sort": sort, "t": time, "limit": limit}
-    else:
-        path = "search"
-        params = {"q": query, "sort": sort, "t": time, "limit": limit}
+        params["restrict_sr"] = "1"
 
     listing = _api_get(path, params).get("data", {})
-    return {
-        "items": [_clean_post(item) for item in listing.get("children", [])],
-        "next_cursor": listing.get("after"),
-    }
+    return {"items": _listing_posts(listing), "next_cursor": listing.get("after")}
 
 
 def _do_posts(
@@ -154,10 +178,7 @@ def _do_posts(
     sort = enum_value(sort, "sort", _POST_SORTS) or "hot"
     limit = bounded_int(limit, "limit", minimum=1, maximum=100) or 10
     listing = _api_get(f"r/{sub}/{sort}", {"limit": limit}).get("data", {})
-    return {
-        "items": [_clean_post(item) for item in listing.get("children", [])],
-        "next_cursor": listing.get("after"),
-    }
+    return {"items": _listing_posts(listing), "next_cursor": listing.get("after")}
 
 
 def _do_subreddit(subreddit: str | None) -> dict[str, Any]:
@@ -177,16 +198,11 @@ def _do_post(post_id: str | None, comments: int | None) -> dict[str, Any]:
     if not isinstance(response, list) or len(response) < 2:
         raise ApiError("unexpected reddit post response")
     post_listing = response[0].get("data", {}).get("children", [])
-    comment_listing = response[1].get("data", {}).get("children", [])
     if not post_listing:
         raise ApiError("post not found")
     return {
         "post": _clean_post(post_listing[0]),
-        "comments": [
-            _clean_comment(item)
-            for item in comment_listing
-            if item.get("kind") == "t1"
-        ],
+        "comments": _flatten_comments(response[1])[:n],
     }
 
 
@@ -197,10 +213,7 @@ def _do_user(username: str | None, posts: int | None) -> dict[str, Any]:
     n = bounded_int(posts, "posts", minimum=1, maximum=100) or 10
     about = _clean_user(_api_get(f"user/{name}/about"))
     listing = _api_get(f"user/{name}/submitted", {"limit": n}).get("data", {})
-    return {
-        "user": about,
-        "posts": [_clean_post(item) for item in listing.get("children", [])],
-    }
+    return {"user": about, "posts": _listing_posts(listing)}
 
 
 def reddit(
@@ -221,7 +234,9 @@ def reddit(
       - search:    full-text search posts. required: query. optional: subreddit, sort, time, limit.
       - posts:     list posts in a subreddit. required: subreddit. optional: sort, limit.
       - subreddit: subreddit metadata. required: subreddit.
-      - post:      a post and its top-level comments. required: post_id. optional: comments.
+      - post:      a post and its comment tree, flattened depth-first into a
+                   depth-tagged list. required: post_id.
+                   optional: comments (max returned, 1-100, default 20).
       - user:      user profile + recent submissions. required: username. optional: posts.
     """
     if op == "search":
