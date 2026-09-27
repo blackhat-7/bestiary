@@ -33,10 +33,11 @@ def fetch(
     *,
     params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    data: bytes | None = None,
     retry_codes: frozenset[int] = RETRY_CODES,
     timeout: int = 30,
 ) -> tuple[str, bytes]:
-    """GET url and return (final_url_after_redirects, body).
+    """GET url (POST when `data` is given) and return (final_url_after_redirects, body).
 
     `params` entries set to None are dropped. `service` names the API in errors.
     """
@@ -44,7 +45,7 @@ def fetch(
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
     request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, **(headers or {})}
+        url, data=data, headers={"User-Agent": USER_AGENT, **(headers or {})}
     )
     attempt = 1
     while True:

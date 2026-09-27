@@ -1,12 +1,16 @@
-"""Reddit tool — read-only access to Reddit's public JSON endpoints.
+"""Reddit tool — read-only access to Reddit's JSON API.
 
-Reddit 403s logged-out JSON requests since May 2026, so requests carry the
-`reddit_session` cookie from a logged-in browser, read from $REDDIT_SESSION.
+Reddit 403s logged-out requests, so the tool logs in with app-only OAuth using
+a "script" app's credentials (https://www.reddit.com/prefs/apps), read from
+$REDDIT_CLIENT_ID and $REDDIT_CLIENT_SECRET.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import os
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..core import http
@@ -16,8 +20,10 @@ from ..core.validation import bounded_int, enum_value, name_string
 if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
-BASE_URL = "https://www.reddit.com"
-SESSION_ENV = "REDDIT_SESSION"
+API_URL = "https://oauth.reddit.com"
+TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+ID_ENV = "REDDIT_CLIENT_ID"
+SECRET_ENV = "REDDIT_CLIENT_SECRET"
 
 RedditOp = Literal["search", "posts", "subreddit", "post", "user"]
 TimeRange = Literal["hour", "day", "week", "month", "year", "all"]
@@ -29,25 +35,48 @@ _SEARCH_SORTS = {"relevance", "hot", "top", "new", "comments"}
 _POST_SORTS = {"hot", "new", "top", "rising", "controversial"}
 _TIME_VALUES = {"hour", "day", "week", "month", "year", "all"}
 
+_token: tuple[str, float] | None = None  # (access_token, monotonic expiry)
 
-def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    session = os.environ.get(SESSION_ENV)
-    if not session:
+
+def _access_token() -> str:
+    """Return a cached app-only OAuth token, fetching a new one when it expires."""
+    global _token
+    if _token is not None and monotonic() < _token[1]:
+        return _token[0]
+    client_id = os.environ.get(ID_ENV)
+    secret = os.environ.get(SECRET_ENV)
+    if not client_id or not secret:
         raise ApiError(
-            f"{SESSION_ENV} is not set: copy the reddit_session cookie from a "
-            "browser logged into reddit.com"
+            f"{ID_ENV} and {SECRET_ENV} must be set: the credentials of a "
+            "script app from https://www.reddit.com/prefs/apps"
         )
+    basic = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
     try:
-        return http.get_json(
-            f"{BASE_URL}/{path}.json",
-            "reddit",
-            params={"raw_json": "1", **(params or {})},
-            headers={"Cookie": f"reddit_session={session}"},
+        _, body = http.fetch(
+            TOKEN_URL,
+            "reddit login",
+            data=b"grant_type=client_credentials",
+            headers={"Authorization": f"Basic {basic}"},
         )
     except http.HttpError as exc:
-        if exc.code == 403:
-            raise ApiError(f"reddit 403: {SESSION_ENV} may be expired or invalid") from exc
+        if exc.code == 401:
+            raise ApiError(f"reddit login failed: check {ID_ENV} and {SECRET_ENV}") from exc
         raise
+    data = json.loads(body)
+    if "access_token" not in data:
+        raise ApiError(f"reddit login failed: {data.get('error', 'no access_token')}")
+    # Refresh a minute early so a token never expires mid-request.
+    _token = (data["access_token"], monotonic() + data.get("expires_in", 3600) - 60)
+    return _token[0]
+
+
+def _api_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    return http.get_json(
+        f"{API_URL}/{path}",
+        "reddit",
+        params={"raw_json": "1", **(params or {})},
+        headers={"Authorization": f"Bearer {_access_token()}"},
+    )
 
 
 def _clean_post(raw: dict[str, Any]) -> dict[str, Any]:
@@ -203,7 +232,7 @@ def reddit(
     username: str | None = None,
     posts: int | None = None,
 ) -> dict[str, Any]:
-    """Read Reddit (public JSON endpoints, authenticated via $REDDIT_SESSION).
+    """Read Reddit (JSON API, logged in via $REDDIT_CLIENT_ID/$REDDIT_CLIENT_SECRET).
 
     Operations:
       - search:    full-text search posts. required: query. optional: subreddit, sort, time, limit.

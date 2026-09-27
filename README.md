@@ -72,11 +72,26 @@ Verify either approach with `bestiary list` (or
 
 | Tool | What it does | Auth |
 |---|---|---|
-| `reddit`        | read posts/comments/subreddits/users via Reddit's public JSON API | `REDDIT_SESSION`: the `reddit_session` cookie from a logged-in browser |
+| `reddit`        | read posts/comments/subreddits/users via Reddit's JSON API | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` ([see below](#reddit-login)) |
 | `arxiv`         | search arXiv, fetch paper metadata, and read paper text via the HTML rendering | none |
 | `hackernews`    | search HN, fetch a story with its comment tree, list front page, look up users (Algolia HN API) | none |
 | `stackexchange` | search Stack Overflow / Server Fault / Super User / etc., fetch a question with answers | none |
 | `youtube`       | fetch YouTube video transcripts (and list available languages). requires the `[youtube]` extra | none |
+
+### Reddit login
+
+Reddit 403s logged-out requests, so the tool logs in with OAuth. Create a
+**script** app at <https://www.reddit.com/prefs/apps> and give bestiary its
+credentials:
+
+```bash
+REDDIT_CLIENT_ID=...       # the id under the app name
+REDDIT_CLIENT_SECRET=...
+```
+
+The tool uses app-only OAuth: read-only, no Reddit password, no expiring cookie.
+MCP servers can't prompt you interactively, so pass these through your MCP
+client config's `env` block.
 
 ## Picking which tools register (context cost control)
 
